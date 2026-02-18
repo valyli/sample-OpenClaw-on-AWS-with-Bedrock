@@ -142,61 +142,129 @@ Click to deploy:
 > 1. Enable Bedrock models in [Bedrock Console](https://console.aws.amazon.com/bedrock/)
 > 2. Create an EC2 key pair in your target region
 
-### Alternative: CLI Deploy
+### Alternative: CLI Deploy (Interactive Script)
 
+**Prerequisites**:
 - AWS account with Bedrock access
-- [AWS CLI](https://aws.amazon.com/cli/) installed
-- [SSM Session Manager Plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed
-- EC2 key pair created
+- [AWS CLI](https://aws.amazon.com/cli/) installed and configured
+- EC2 key pair created in your target region
 
-### Manual Deploy (Alternative)
-
-**Using helper script**:
+**One-command deployment with interactive prompts**:
 
 ```bash
-./scripts/deploy.sh clawdbot-bedrock us-west-2 your-keypair
+./deploy.sh
 ```
 
-**Using AWS CLI**:
+The script will guide you through:
+1. **Region selection** (us-west-2, us-east-1, eu-west-1, ap-northeast-1, or custom)
+2. **Key pair selection** (automatically lists available key pairs)
+3. **Model selection** (8 models with pricing info)
+4. **Instance type** (default: c7g.large)
+5. **VPC endpoints** (yes/no)
+6. **Deployment confirmation** with cost estimate
+7. **Automatic deployment** and wait for completion (~8-10 minutes)
+8. **Access instructions** with instance ID and token URL
+
+**Example session**:
+```bash
+$ ./deploy.sh
+Select AWS Region:
+1) us-west-2 (Oregon) - Recommended
+2) us-east-1 (N. Virginia)
+3) eu-west-1 (Ireland)
+4) ap-northeast-1 (Tokyo)
+Enter choice (1-4) or custom region: 4
+✅ Selected region: ap-northeast-1
+
+Select Bedrock Model:
+1) Nova 2 Lite (default, cheapest, $0.30/$2.50 per 1M tokens)
+2) Claude Sonnet 4.5 (most capable, $3/$15 per 1M tokens)
+3) Claude Sonnet 4.6 (latest, $3/$15 per 1M tokens)
+...
+Enter choice (1-8, default: 1): 3
+✅ Selected model: global.anthropic.claude-sonnet-4-20250514-v1:0
+
+🚀 Deploying CloudFormation stack...
+⏳ Waiting for deployment to complete (8-10 minutes)...
+✅ Deployment Complete!
+```
+
+**Manual AWS CLI deployment** (if you prefer):
 
 ```bash
 aws cloudformation create-stack \
-  --stack-name clawdbot-bedrock \
-  --template-body file://cloudformation/clawdbot-bedrock.yaml \
-  --parameters ParameterKey=KeyPairName,ParameterValue=your-keypair \
+  --stack-name openclaw-bedrock \
+  --template-body file://clawdbot-bedrock.yaml \
+  --parameters \
+      ParameterKey=OpenClawModel,ParameterValue=global.amazon.nova-2-lite-v1:0 \
+      ParameterKey=InstanceType,ParameterValue=c7g.large \
+      ParameterKey=KeyPairName,ParameterValue=your-keypair \
+      ParameterKey=CreateVPCEndpoints,ParameterValue=true \
   --capabilities CAPABILITY_IAM \
   --region us-west-2
 
 # Wait for completion
 aws cloudformation wait stack-create-complete \
-  --stack-name clawdbot-bedrock \
+  --stack-name openclaw-bedrock \
   --region us-west-2
 ```
 
-> **Note**: Lambda pre-check runs automatically during deployment. If it fails, check CloudFormation events for details.
+### Access OpenClaw
 
-### Access Clawdbot
+**After deployment completes**, the `deploy.sh` script outputs everything you need. Or retrieve manually:
 
 ```bash
-# Get instance ID
+# Get instance ID and access URL
 INSTANCE_ID=$(aws cloudformation describe-stacks \
-  --stack-name clawdbot-bedrock \
+  --stack-name openclaw-bedrock-* \
+  --region <your-region> \
   --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
   --output text)
 
-# Start port forwarding
+ACCESS_URL=$(aws cloudformation describe-stacks \
+  --stack-name openclaw-bedrock-* \
+  --region <your-region> \
+  --query 'Stacks[0].Outputs[?OutputKey==`Step3AccessURL`].OutputValue' \
+  --output text)
+
+# Start port forwarding (keep terminal open)
 aws ssm start-session \
   --target $INSTANCE_ID \
+  --region <your-region> \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-# Get token (new terminal)
-aws ssm start-session --target $INSTANCE_ID
-sudo su - ubuntu
-cat ~/.clawdbot/gateway_token.txt
+# Open browser with the URL (includes token)
+echo $ACCESS_URL
+# Example: http://localhost:18789/?token=abc123...
+```
 
-# Open browser
-http://localhost:18789/?token=<your-token>
+**Troubleshooting**: If port 18789 is already in use (e.g., by VS Code):
+
+```bash
+# Option 1: Kill the process using port 18789
+kill -9 $(lsof -ti:18789)
+
+# Option 2: Use a different local port
+aws ssm start-session \
+  --target $INSTANCE_ID \
+  --region <your-region> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["18789"],"localPortNumber":["8888"]}'
+# Then open: http://localhost:8888/?token=<your-token>
+```
+
+**Check deployment status**:
+
+```bash
+# Use the status check script
+./check-status.sh
+
+# Or manually check logs
+aws ssm start-session --target $INSTANCE_ID --region <your-region>
+sudo su - ubuntu
+tail -f /var/log/openclaw-setup.log
+systemctl --user status openclaw
 ```
 
 ## How to Use openclaw
