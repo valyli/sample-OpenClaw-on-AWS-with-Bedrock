@@ -140,7 +140,7 @@ Resources:
     Properties:
       VpcId: !Ref OpenClawVPC
       CidrBlock: "10.0.2.0/24"
-      AvailabilityZone: !Select [0, !GetAZs '']
+      AvailabilityZone: !Select [1, !GetAZs '']
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-private-subnet"
@@ -162,6 +162,12 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
       RouteTableId: !Ref PublicRouteTable
 
   # VPC Endpoint Security Group
@@ -234,6 +240,67 @@ Resources:
       SecurityGroupIds:
         - !Ref VPCEndpointSecurityGroup
 
+  # ==================== ALB Resources ====================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "ALB Security Group"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "HTTP from internet"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-alb"
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet
+        - !Ref PrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb"
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-tg"
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref OpenClawVPC
+      HealthCheckPath: "/"
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref OpenClawInstance
+          Port: 8080
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-tg"
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
   # ==================== IAM Role ====================
   OpenClawInstanceRole:
     Type: AWS::IAM::Role
@@ -300,6 +367,17 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-sg"
+
+  # Allow ALB to access port 8080 (socat forwards to OpenClaw)
+  OpenClawALBIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref OpenClawSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Description: "Allow ALB to access OpenClaw via socat"
 
   # ==================== EC2 Instance ====================
   OpenClawInstance:
@@ -381,6 +459,9 @@ Resources:
           systemctl start docker
           usermod -aG docker ubuntu
           
+          # Install socat for port forwarding
+          apt-get install -y socat
+          
           # Install Node.js
           echo "[5/9] Installing Node.js..."
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
@@ -451,7 +532,6 @@ Resources:
             "gateway": {
               "mode": "local",
               "port": 18789,
-              "bind": "loopback",
               "controlUi": {
                 "enabled": true,
                 "allowInsecureAuth": true
@@ -501,6 +581,27 @@ Resources:
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
           openclaw daemon install || echo "Daemon install failed"
           '
+          
+          # Setup socat port forwarding for ALB access
+          echo "[8.5/9] Setting up port forwarding for ALB..."
+          cat > /etc/systemd/system/openclaw-portforward.service << 'SOCATEOF'
+          [Unit]
+          Description=OpenClaw Port Forwarding for ALB
+          After=network.target
+          
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:18789
+          Restart=always
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
+          SOCATEOF
+          
+          systemctl daemon-reload
+          systemctl enable openclaw-portforward
+          systemctl start openclaw-portforward
           
           # Enable messaging channels
           echo "[7.5/9] Enabling messaging channels..."
@@ -636,6 +737,16 @@ Outputs:
           - !Split 
             - '"}'
             - !GetAtt OpenClawWaitCondition.Data
+
+  ALBEndpoint:
+    Description: "ALB HTTP Endpoint (Public Access)"
+    Value: !Sub |
+      http://${ApplicationLoadBalancer.DNSName}/?token=<GET_TOKEN_FROM_SSM>
+
+  GetToken:
+    Description: "Get your access token"
+    Value: !Sub |
+      aws ssm get-parameter --name /openclaw/${AWS::StackName}/gateway-token --with-decryption --query Parameter.Value --output text --region ${AWS::Region}
 
   Step4StartChatting:
     Description: "STEP 4: Start using OpenClaw!"

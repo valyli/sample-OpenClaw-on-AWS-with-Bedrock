@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw with CloudFront - Public HTTPS Access'
+
+Parameters:
+  ExistingStackName:
+    Type: String
+    Description: "Name of existing OpenClaw stack"
+    Default: "openclaw-bedrock"
+
+  DomainName:
+    Type: String
+    Description: "Custom domain (optional, leave empty to use CloudFront domain)"
+    Default: ""
+
+  CertificateArn:
+    Type: String
+    Description: "ACM Certificate ARN for custom domain (optional)"
+    Default: ""
+
+Conditions:
+  UseCustomDomain: !Not [!Equals [!Ref DomainName, ""]]
+
+Resources:
+  # Application Load Balancer
+  OpenClawALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-alb"
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - Fn::ImportValue: !Sub "${ExistingStackName}-PublicSubnet"
+        - Fn::ImportValue: !Sub "${ExistingStackName}-PrivateSubnet"
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "ALB Security Group"
+      VpcId:
+        Fn::ImportValue: !Sub "${ExistingStackName}-VPC"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # Target Group
+  OpenClawTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-tg"
+      Port: 18789
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue: !Sub "${ExistingStackName}-VPC"
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id:
+            Fn::ImportValue: !Sub "${ExistingStackName}-InstanceId"
+          Port: 18789
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref OpenClawALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref OpenClawTargetGroup
+
+  # CloudFront Distribution
+  OpenClawDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "OpenClaw Distribution - ${AWS::StackName}"
+        Origins:
+          - Id: ALBOrigin
+            DomainName: !GetAtt OpenClawALB.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: ALBOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+            Headers:
+              - "*"
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: !If [UseCustomDomain, !Ref AWS::NoValue, true]
+          AcmCertificateArn: !If [UseCustomDomain, !Ref CertificateArn, !Ref AWS::NoValue]
+          SslSupportMethod: !If [UseCustomDomain, sni-only, !Ref AWS::NoValue]
+        Aliases: !If
+          - UseCustomDomain
+          - [!Ref DomainName]
+          - !Ref AWS::NoValue
+
+Outputs:
+  CloudFrontURL:
+    Description: "CloudFront URL (HTTPS)"
+    Value: !Sub "https://${OpenClawDistribution.DomainName}"
+
+  CustomDomainURL:
+    Condition: UseCustomDomain
+    Description: "Custom Domain URL"
+    Value: !Sub "https://${DomainName}"
+
+  ALBEndpoint:
+    Description: "ALB Endpoint (HTTP)"
+    Value: !Sub "http://${OpenClawALB.DNSName}"
+
+  AccessInstructions:
+    Description: "How to access"
+    Value: !Sub |
+      1. Get token: aws ssm get-parameter --name /openclaw/${ExistingStackName}/gateway-token --with-decryption --query Parameter.Value --output text
+      2. Open: https://${OpenClawDistribution.DomainName}/?token=<YOUR_TOKEN>
