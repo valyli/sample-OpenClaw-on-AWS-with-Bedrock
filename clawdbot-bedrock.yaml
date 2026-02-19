@@ -84,12 +84,16 @@ Mappings:
   RegionMap:
     us-east-1:
       AMI: "resolve-ssm"
+      CloudFrontPrefixList: "pl-3b927c52"
     us-west-2:
       AMI: "resolve-ssm"
+      CloudFrontPrefixList: "pl-82a045eb"
     eu-west-1:
       AMI: "resolve-ssm"
+      CloudFrontPrefixList: "pl-4fa04526"
     ap-northeast-1:
       AMI: "resolve-ssm"
+      CloudFrontPrefixList: "pl-58a04531"
 
 Resources:
   # ==================== Wait Condition ====================
@@ -244,14 +248,14 @@ Resources:
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "ALB Security Group"
+      GroupDescription: "ALB Security Group - CloudFront Only"
       VpcId: !Ref OpenClawVPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: "HTTP from internet"
+          SourcePrefixListId: !FindInMap [RegionMap, !Ref "AWS::Region", CloudFrontPrefixList]
+          Description: "HTTP from CloudFront only"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-alb-sg"
@@ -378,6 +382,38 @@ Resources:
       ToPort: 8080
       SourceSecurityGroupId: !Ref ALBSecurityGroup
       Description: "Allow ALB to access OpenClaw via socat"
+
+  # ==================== CloudFront ====================
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: ApplicationLoadBalancer
+    Properties:
+      DistributionConfig:
+        Comment: OpenClaw Distribution
+        Enabled: true
+        Origins:
+          - Id: ALBOrigin
+            DomainName: !GetAtt ApplicationLoadBalancer.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: ALBOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+            Headers:
+              - Host
+              - CloudFront-Forwarded-Proto
+              - User-Agent
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+        PriceClass: PriceClass_100
 
   # ==================== EC2 Instance ====================
   OpenClawInstance:
@@ -739,9 +775,18 @@ Outputs:
             - !GetAtt OpenClawWaitCondition.Data
 
   ALBEndpoint:
-    Description: "ALB HTTP Endpoint (Public Access)"
+    Description: "ALB HTTP Endpoint (Internal - Use CloudFront instead)"
     Value: !Sub |
       http://${ApplicationLoadBalancer.DNSName}/?token=<GET_TOKEN_FROM_SSM>
+
+  CloudFrontDomain:
+    Description: "CloudFront Domain (HTTPS - Primary Access)"
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CloudFrontURL:
+    Description: "Access OpenClaw via CloudFront (Recommended)"
+    Value: !Sub |
+      https://${CloudFrontDistribution.DomainName}/?token=<GET_TOKEN_FROM_SSM>
 
   GetToken:
     Description: "Get your access token"

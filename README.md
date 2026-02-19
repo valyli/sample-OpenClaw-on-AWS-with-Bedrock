@@ -163,6 +163,46 @@ The script will guide you through:
 5. **VPC endpoints** (yes/no)
 6. **Deployment confirmation** with cost estimate
 7. **Automatic deployment** and wait for completion (~8-10 minutes)
+8. **Access instructions** with CloudFront URL and token
+
+**Example session**:
+```bash
+$ ./deploy.sh
+Select AWS Region:
+1) us-west-2 (Oregon) - Recommended
+2) us-east-1 (N. Virginia)
+3) eu-west-1 (Ireland)
+4) ap-northeast-1 (Tokyo)
+Enter choice (1-4) or custom region: 1
+✅ Selected region: us-west-2
+
+Select Bedrock Model:
+1) Nova 2 Lite (default, cheapest, $0.30/$2.50 per 1M tokens)
+2) Claude Sonnet 4.5 (most capable, $3/$15 per 1M tokens)
+...
+Enter choice (1-8, default: 1): 1
+✅ Selected model: global.amazon.nova-2-lite-v1:0
+
+🚀 Deploying CloudFormation stack...
+⏳ Waiting for deployment to complete (8-10 minutes)...
+✅ Deployment Complete!
+
+CloudFront URL:
+https://d1j1dt3uqh1vuq.cloudfront.net/?token=abc123...
+```th interactive prompts**:
+
+```bash
+./deploy.sh
+```
+
+The script will guide you through:
+1. **Region selection** (us-west-2, us-east-1, eu-west-1, ap-northeast-1, or custom)
+2. **Key pair selection** (automatically lists available key pairs)
+3. **Model selection** (8 models with pricing info)
+4. **Instance type** (default: c7g.large)
+5. **VPC endpoints** (yes/no)
+6. **Deployment confirmation** with cost estimate
+7. **Automatic deployment** and wait for completion (~8-10 minutes)
 8. **Access instructions** with instance ID and token URL
 
 **Example session**:
@@ -211,33 +251,49 @@ aws cloudformation wait stack-create-complete \
 
 ### Access OpenClaw
 
-**After deployment completes**, the `deploy.sh` script outputs everything you need. Or retrieve manually:
+**After deployment completes**, use the provided script to get your CloudFront access URL:
 
 ```bash
-# Get instance ID and access URL
-INSTANCE_ID=$(aws cloudformation describe-stacks \
-  --stack-name openclaw-bedrock-* \
-  --region <your-region> \
-  --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
-  --output text)
-
-ACCESS_URL=$(aws cloudformation describe-stacks \
-  --stack-name openclaw-bedrock-* \
-  --region <your-region> \
-  --query 'Stacks[0].Outputs[?OutputKey==`Step3AccessURL`].OutputValue' \
-  --output text)
-
-# Start port forwarding (keep terminal open)
-aws ssm start-session \
-  --target $INSTANCE_ID \
-  --region <your-region> \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
-
-# Open browser with the URL (includes token)
-echo $ACCESS_URL
-# Example: http://localhost:18789/?token=abc123...
+./get-cloudfront-url.sh us-west-2
 ```
+
+**Output**:
+```
+✅ OpenClaw CloudFront Access
+
+CloudFront URL:
+https://d1j1dt3uqh1vuq.cloudfront.net/?token=63895a9992c25c1bcf0c6e5040a3e0c96ec8fcbc2f68b7e6
+
+CloudFront Domain: d1j1dt3uqh1vuq.cloudfront.net
+Token: 63895a9992c25c1bcf0c6e5040a3e0c96ec8fcbc2f68b7e6
+```
+
+**Access Methods**:
+
+1. **CloudFront (Recommended - HTTPS, Secure)**:
+   - Open the CloudFront URL in your browser
+   - Fully secured with CloudFront DDoS protection
+   - ALB only accepts CloudFront traffic
+
+2. **SSM Port Forwarding (Alternative - For local access)**:
+   ```bash
+   # Get instance ID from CloudFormation outputs
+   INSTANCE_ID=$(aws cloudformation describe-stacks \
+     --stack-name openclaw-bedrock-* \
+     --region us-west-2 \
+     --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
+     --output text)
+   
+   # Start port forwarding
+   aws ssm start-session \
+     --target $INSTANCE_ID \
+     --region us-west-2 \
+     --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+   
+   # Open in browser
+   http://localhost:18789/?token=<YOUR_TOKEN>
+   ```
 
 **Troubleshooting**: If port 18789 is already in use (e.g., by VS Code):
 
@@ -421,23 +477,42 @@ For detailed guides, visit [openclaw Documentation](https://docs.molt.bot/).
 ## Architecture
 
 ```
-Your Phone/Computer → WhatsApp/Telegram → EC2 (openclaw) → Bedrock (Claude)
+User → CloudFront (HTTPS) → ALB (HTTP) → EC2:8080 (socat) → OpenClaw:18789
                                               ↓
                                          Your Data Stays Here
                                          (Secure, Private, Audited)
 ```
 
+### Security Architecture
+
+```
+✅ CloudFront (Public HTTPS)
+    ↓ Only CloudFront IPs allowed
+✅ ALB (Private HTTP)
+    ↓ Only ALB security group allowed  
+✅ EC2:8080 (socat)
+    ↓ Localhost only
+✅ OpenClaw:18789 (127.0.0.1)
+```
+
+**Security Layers**:
+1. **CloudFront**: DDoS protection, HTTPS termination, global CDN
+2. **ALB Security Group**: Only accepts traffic from CloudFront managed prefix list
+3. **EC2 Security Group**: Only accepts traffic from ALB security group on port 8080
+4. **socat**: Forwards 0.0.0.0:8080 → 127.0.0.1:18789
+5. **OpenClaw**: Only listens on localhost (127.0.0.1:18789)
+
 ### Why EC2 + Bedrock?
 
-**🔒 Security**: IAM roles replace API keys—no credentials to leak. CloudTrail logs every API call for compliance.
+**🔒 Security**: IAM roles replace API keys—no credentials to leak. CloudTrail logs every API call for compliance. CloudFront provides DDoS protection.
 
-**💰 Cost**: Multi-model strategy (Nova 90% cheaper than Claude) + Graviton (20% cheaper than x86) = $39/month total.
+**💰 Cost**: Multi-model strategy (Nova 90% cheaper than Claude) + Graviton (20% cheaper than x86) + CloudFront caching = $60/month total.
 
 **🛡️ Reliability**: 99.99% uptime in enterprise data centers vs home internet. Auto-restart, CloudWatch monitoring included.
 
 **📊 Transparency**: Cost Explorer tracks every dollar. CloudTrail audits every API call. No guessing.
 
-**🌐 Scale**: Deploy globally with identical config. Global CRIS auto-routes to optimal regions. Scale t4g.small to c7g.xlarge in minutes.
+**🌐 Scale**: Deploy globally with identical config. CloudFront auto-routes to optimal regions. Scale t4g.small to c7g.xlarge in minutes.
 
 **🚀 Orchestration**: openclaw can spin up 100 Spot instances for parallel tasks, trigger Glue jobs, invoke Lambda—impossible on local hardware.
 
@@ -486,11 +561,12 @@ Cost: ~$0.01/request | Time: 2-5s | Security: Private network
 
 | Service | Configuration | Monthly Cost |
 |---------|--------------|--------------|
-| EC2 (t4g.medium, Graviton) | 2 vCPU, 4GB RAM | $24.19 |
+| EC2 (c7g.large, Graviton) | 2 vCPU, 4GB RAM | $48 |
 | EBS (gp3) | 30GB | $2.40 |
 | VPC Endpoints | 3 endpoints | $21.60 |
-| Data Transfer | VPC endpoint processing | $5-10 |
-| **Subtotal** | | **$53-58** |
+| CloudFront | Data transfer + requests | $5-15 |
+| ALB | Load balancer + data | $16-20 |
+| **Subtotal** | | **$93-107** |
 
 ### Bedrock Usage Cost
 
@@ -504,13 +580,14 @@ Cost: ~$0.01/request | Time: 2-5s | Security: Private network
 
 **Example**: 100 conversations/day with Nova 2 Lite ≈ $5-8/month
 
-**Total**: ~$58-66/month for light usage
+**Total**: ~$98-115/month for light usage
 
 ### Cost Optimization
 
 - Use Nova 2 Lite instead of Claude: 90% cheaper
 - Use Graviton instances: 20-40% cheaper than x86
 - Disable VPC endpoints: Save $22/month (less secure)
+- Use CloudFront caching: Reduce origin requests
 - Use Savings Plans: Save 30-40% on EC2
 
 ## Configuration
