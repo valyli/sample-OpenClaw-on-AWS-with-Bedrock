@@ -139,22 +139,40 @@ INSTANCE_ID=$(aws cloudformation describe-stacks \
     --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
     --output text)
 
-ACCESS_URL=$(aws cloudformation describe-stacks \
+CF_DOMAIN=$(aws cloudformation describe-stacks \
     --stack-name $STACK_NAME \
     --region $REGION \
-    --query 'Stacks[0].Outputs[?OutputKey==`Step3AccessURL`].OutputValue' \
+    --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDomain`].OutputValue' \
     --output text)
+
+TOKEN=$(aws ssm get-parameter \
+    --name "/openclaw/$STACK_NAME/gateway-token" \
+    --with-decryption \
+    --query Parameter.Value \
+    --output text \
+    --region $REGION 2>/dev/null || echo "")
 
 echo "📋 Access Instructions:"
 echo ""
-echo "1. Install SSM Plugin (one-time):"
-echo "   https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+
+if [ -n "$CF_DOMAIN" ] && [ "$CF_DOMAIN" != "None" ]; then
+    echo "🌐 CloudFront URL (Recommended - HTTPS, Secure):"
+    echo "   https://$CF_DOMAIN/?token=$TOKEN"
+    echo ""
+    echo "   Note: CloudFront may take 15-20 minutes to fully deploy."
+    echo "   Check status: aws cloudfront list-distributions --query 'DistributionList.Items[?Comment==\`OpenClaw Distribution\`].Status' --output text"
+    echo ""
+fi
+
+echo "🔒 SSM Port Forwarding (Alternative - Local access):"
+echo "   1. Install SSM Plugin (one-time):"
+echo "      https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
 echo ""
-echo "2. Run port forwarding (keep terminal open):"
-echo "   aws ssm start-session --target $INSTANCE_ID --region $REGION --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+echo "   2. Run port forwarding (keep terminal open):"
+echo "      aws ssm start-session --target $INSTANCE_ID --region $REGION --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
 echo ""
-echo "3. Open in browser:"
-echo "   $ACCESS_URL"
+echo "   3. Open in browser:"
+echo "      http://localhost:18789/?token=$TOKEN"
 echo ""
 echo "=========================================="
 echo "🎉 Start using OpenClaw!"
