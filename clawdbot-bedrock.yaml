@@ -288,6 +288,8 @@ Resources:
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200-499"
       Targets:
         - Id: !Ref OpenClawInstance
           Port: 8080
