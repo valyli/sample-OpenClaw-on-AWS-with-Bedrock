@@ -409,9 +409,7 @@ Resources:
             Cookies:
               Forward: all
             Headers:
-              - Host
-              - CloudFront-Forwarded-Proto
-              - User-Agent
+              - "*"
           MinTTL: 0
           DefaultTTL: 0
           MaxTTL: 0
@@ -525,10 +523,10 @@ Resources:
           
           # Install OpenClaw (with timeout and retry)
           npm config set registry https://registry.npmjs.org/
-          npm install -g openclaw@latest --timeout=300000 || {
+          npm install -g openclaw@2026.2.17 --timeout=300000 || {
             echo "OpenClaw installation failed, retrying..."
             npm cache clean --force
-            npm install -g openclaw@latest --timeout=300000
+            npm install -g openclaw@2026.2.17 --timeout=300000
           }
           
           if ! grep -q 'NVM_DIR' ~/.bashrc; then
@@ -570,9 +568,11 @@ Resources:
             "gateway": {
               "mode": "local",
               "port": 18789,
+              "trustedProxies": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
               "controlUi": {
                 "enabled": true,
-                "allowInsecureAuth": true
+                "allowInsecureAuth": true,
+                "allowedOrigins": ["*"]
               },
               "auth": {
                 "mode": "token",
